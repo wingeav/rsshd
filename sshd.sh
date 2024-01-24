@@ -6,17 +6,6 @@
 # Settings directory
 SDIR=/etc/ssh
 
-# Make sure we have a root password, since Alpine does not have a root
-# password by default and we want to have this minimal level of security
-if [ -z "$PASSWORD" ]; then
-    PASSWORD=$(< /dev/urandom tr -dc A-Z-a-z-0-9 | head -c8)
-    echo "==========="
-    echo "== Root Password is $PASSWORD"
-    echo "==========="
-    echo
-fi
-echo "root:${PASSWORD}" | chpasswd
-
 # Directory for HOSTKEYS, create if necessary
 if [ -z "$KEYS" ]; then
     KEYS=$SDIR/keys
@@ -25,44 +14,13 @@ if [ ! -d $KEYS ]; then
     mkdir -p $KEYS
 fi
 
-# Generate server keys, if necessary. ssh-keygen generates the keys in the
-# default directory, not where we want the keys, so we move the keys once they
-# have been generated.
-if [ ! -f "${KEYS}/ssh_host_rsa_key" ]; then
-    # One shot generation, -A really is for init.d style startup script, but
-    # this is what we sort of are.
-    ssh-keygen -A
-    
-    # Move the keys to the location that we want
-    if [ -f "$SDIR/ssh_host_rsa_key" ]; then
-        mv $SDIR/ssh_host_rsa_key $KEYS/ssh_host_rsa_key
-        mv $SDIR/ssh_host_rsa_key.pub $KEYS/ssh_host_rsa_key.pub
-    fi
-    if [ -f "$SDIR/ssh_host_dsa_key" ]; then
-        mv $SDIR/ssh_host_dsa_key $KEYS/ssh_host_dsa_key
-        mv $SDIR/ssh_host_dsa_key.pub $KEYS/ssh_host_dsa_key.pub
-    fi
-    if [ -f "$SDIR/ssh_host_ecdsa_key" ]; then
-        mv $SDIR/ssh_host_ecdsa_key $KEYS/ssh_host_ecdsa_key
-        mv $SDIR/ssh_host_ecdsa_key.pub $KEYS/ssh_host_ecdsa_key.pub
-    fi
-    if [ -f "$SDIR/ssh_host_ed25519_key" ]; then
-        mv $SDIR/ssh_host_ed25519_key $KEYS/ssh_host_ed25519_key
-        mv $SDIR/ssh_host_ed25519_key.pub $KEYS/ssh_host_ed25519_key.pub
-    fi
+# Generate a ed25519 server key in the keys dir, if necessary.
+if [ ! -f "${KEYS}/ssh_host_ed25519_key" ]; then
+    ssh-keygen -t ed25519 -f ${KEYS}/ssh_host_ed25519_key -N ""
 fi
 
 # Arrange for the config to point at the proper server keys, i.e. at the proper
 # location
-if [ -f "$KEYS/ssh_host_rsa_key" ]; then
-    sed -i "s;\#HostKey $SDIR/ssh_host_rsa_key;HostKey $KEYS/ssh_host_rsa_key;g" $SDIR/sshd_config
-fi
-if [ -f "$KEYS/ssh_host_dsa_key" ]; then
-    sed -i "s;\#HostKey $SDIR/ssh_host_dsa_key;HostKey $KEYS/ssh_host_dsa_key;g" $SDIR/sshd_config
-fi
-if [ -f "$KEYS/ssh_host_ecdsa_key" ]; then
-    sed -i "s;\#HostKey $SDIR/ssh_host_ecdsa_key;HostKey $KEYS/ssh_host_ecdsa_key;g" $SDIR/sshd_config
-fi
 if [ -f "$KEYS/ssh_host_ed25519_key" ]; then
     sed -i "s;\#HostKey $SDIR/ssh_host_ed25519_key;HostKey $KEYS/ssh_host_ed25519_key;g" $SDIR/sshd_config
 fi
@@ -71,18 +29,19 @@ fi
 if [ -z "$LOCAL" -o "$LOCAL" == 0 ]; then
     sed -i "s;\GatewayPorts no;GatewayPorts yes;g" $SDIR/sshd_config
     sed -i "s;\AllowTcpForwarding no;AllowTcpForwarding yes;g" $SDIR/sshd_config
+    sed -i "s;\#ClientAliveInterval \d*;ClientAliveInterval 30;g" $SDIR/sshd_config
+    sed -i "s;\#ClientAliveCountMax \d*;ClientAliveCountMax 99999;g" /etc/ssh//sshd_config
 fi
 
-# Allow root login if a password was set.
-if [ -n "${PASSWORD}" ]; then
-    sed -i "s;\#PermitRootLogin .*;PermitRootLogin yes;g" $SDIR/sshd_config
-fi
+# UsePAM so that our autossh user that has /bin/false as shell can login
+sed -i "s;\#UsePAM no;UsePAM yes;g" $SDIR/sshd_config
 
-# Fix permissions and access to the .ssh directory (in case it was shared with
-# the host)
-chown root $HOME/.ssh
-chmod 755 $HOME/.ssh
+# add proper Ciphers, Keys, etc.
+echo Ciphers aes128-ctr,aes192-ctr,aes256-ctr,aes128-gcm@openssh.com,aes256-gcm@openssh.com >> $SDIR/sshd_config
+echo HostKeyAlgorithms sk-ssh-ed25519-cert-v01@openssh.com,ssh-ed25519-cert-v01@openssh.com,rsa-sha2-512-cert-v01@openssh.com,rsa-sha2-256-cert-v01@openssh.com,sk-ssh-ed25519@openssh.com,ssh-ed25519,rsa-sha2-512,rsa-sha2-256 >> $SDIR/sshd_config
+echo KexAlgorithms diffie-hellman-group-exchange-sha256,diffie-hellman-group16-sha512,diffie-hellman-group18-sha512 >> $SDIR/sshd_config
+echo MACs hmac-sha2-256-etm@openssh.com,hmac-sha2-512-etm@openssh.com >> $SDIR/sshd_config
 
 # Absolute path necessary! Pass all remaining arguents to sshd. This enables to
 # override some options through -o, for example.
-/usr/sbin/sshd -f ${SDIR}/sshd_config -D -e "$@"
+/usr/sbin/sshd.pam -f ${SDIR}/sshd_config -D -e "$@"
